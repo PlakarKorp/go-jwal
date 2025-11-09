@@ -249,11 +249,3 @@ func main() {
 	_ = l.Sync()
 }
 ```
-
----
-
-If you want, I can also add:
-
-* An optional **iterator API** (`Iter(from) Next() ([]byte, idx, error)`)
-* A tiny **sidecar checkpoint file** to avoid re-scanning on open for very large logs
-* An **async writer** that auto-batches via a goroutine/channel for producer-heavy workloads
