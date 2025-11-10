@@ -31,7 +31,7 @@ func (l *Log) Iter(from uint64) (*Iter, error) {
 		if err != nil {
 			return nil, err
 		}
-		hdrOff = dataOff - headerSize
+		hdrOff = dataOff - recordHdrSize
 	}
 	return &Iter{
 		l:      l,
@@ -50,7 +50,7 @@ func (it *Iter) NextInto(dst []byte) ([]byte, uint64, error) {
 		return nil, 0, io.EOF
 	}
 
-	var hdr [headerSize]byte
+	var hdr [recordHdrSize]byte
 
 	l := it.l
 
@@ -60,9 +60,8 @@ func (it *Iter) NextInto(dst []byte) ([]byte, uint64, error) {
 	storedLen := int(binary.LittleEndian.Uint64(hdr[0:8]))
 	wantCRC := binary.LittleEndian.Uint32(hdr[8:12])
 	ulen := binary.LittleEndian.Uint32(hdr[12:16])
-	codec := binary.LittleEndian.Uint32(hdr[16:20])
 
-	dataOff := it.hdrOff + headerSize
+	dataOff := it.hdrOff + recordHdrSize
 	tmp := make([]byte, storedLen)
 	if _, err := l.fp.ReadAt(tmp, dataOff); err != nil {
 		return nil, 0, err
@@ -72,8 +71,8 @@ func (it *Iter) NextInto(dst []byte) ([]byte, uint64, error) {
 	}
 
 	var out []byte
-	switch codec {
-	case codecNone:
+	switch l.compCodec {
+	case compNone:
 		// copy into dst to return an owned slice
 		n := len(tmp)
 		if cap(dst) < n {
@@ -83,7 +82,7 @@ func (it *Iter) NextInto(dst []byte) ([]byte, uint64, error) {
 		}
 		copy(dst, tmp)
 		out = dst
-	case codecSnappy:
+	case compSnappy:
 		if ulen > 0 && int(ulen) <= cap(dst) {
 			dst = dst[:int(ulen)]
 			var err error

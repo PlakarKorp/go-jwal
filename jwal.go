@@ -3,6 +3,7 @@ package jwal
 import (
 	"bufio"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"os"
@@ -12,19 +13,43 @@ import (
 	"github.com/golang/snappy"
 )
 
+// WAL format:
+// File header (little-endian, 16 bytes):
+// [0..3]   uint32 magic          // "JWAL" (0x4c41574a)
+// [4..5]   uint16 version        // current version = 1
+// [6]      uint8  crcAlgo        // checksum algorithm for records (currently only 1=IEEE)
+// [7]      uint8  compAlgo       // compression algorithm for records (0=none,1=snappy)
+// [8..15]  uint64 reserved
+
 // Record layout (little-endian, 24-byte header):
 // [0..7]   uint64 storedLen         // number of bytes stored on disk (after compression if any)
 // [8..11]  uint32 crc32(stored)     // checksum of the stored bytes; used for torn-tail recovery
 // [12..15] uint32 uncompressedLen   // length of payload before compression; 0 if uncompressed
-// [16..19] uint32 codec             // 0=none, 1=snappy
-// [20..23] uint32 reserved
-// [24..]   payload (compressed if codec!=none)
-const headerSize = 24
+// [16..19] uint32 reserved
+// [20..]   payload (compressed if codec!=none)
+
+const walHdrSize = 16
+const recordHdrSize = 20
+const dataBase = walHdrSize
 
 const (
-	codecNone   = 0
-	codecSnappy = 1
+	magicJWAL = 0x4c41574a // "JWAL" in LE
+	version   = 1
+
+	//crcNone uint8 = 0
+	crcIEEE uint8 = 1
+
+	compNone   uint8 = 0
+	compSnappy uint8 = 1
 )
+
+type fileHdr struct {
+	Magic    uint32
+	Version  uint16
+	CrcAlgo  uint8
+	CompAlgo uint8
+	Reserved uint64
+}
 
 type Options struct {
 	NoSync             bool // if true, Append won't fsync; call Sync manually
@@ -53,7 +78,7 @@ type Log struct {
 	retainIndex        bool
 	checkpointInterval uint
 	deleteOnClose      bool
-	codec              uint32 // codecNone or codecSnappy
+	compCodec          uint8
 
 	// counters
 	count atomic.Uint64
@@ -62,19 +87,57 @@ type Log struct {
 	compScratch []byte
 }
 
+func (l *Log) writeFileHeaderLocked() error {
+	var h fileHdr
+	h.Magic = magicJWAL
+	h.Version = version
+	h.CrcAlgo = crcIEEE
+	h.CompAlgo = l.compCodec // reuse existing field but now file-level
+	// Reserved = 0
+	var buf [16]byte
+	binary.LittleEndian.PutUint32(buf[0:4], h.Magic)
+	binary.LittleEndian.PutUint16(buf[4:6], h.Version)
+	buf[6] = h.CrcAlgo
+	buf[7] = h.CompAlgo
+	// 8..15 zero
+	if _, err := l.fp.WriteAt(buf[:], 0); err != nil {
+		return err
+	}
+	return l.fp.Sync()
+}
+
+func (l *Log) readFileHeaderLocked() (fileHdr, error) {
+	var h fileHdr
+	var buf [16]byte
+	if _, err := l.fp.ReadAt(buf[:], 0); err != nil {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			// treat as new empty file; caller will write header
+			return h, nil
+		}
+		return h, err
+	}
+	h.Magic = binary.LittleEndian.Uint32(buf[0:4])
+	h.Version = binary.LittleEndian.Uint16(buf[4:6])
+	h.CrcAlgo = buf[6]
+	h.CompAlgo = buf[7]
+	h.Reserved = binary.LittleEndian.Uint64(buf[8:16])
+	return h, nil
+}
+
 // Open opens or creates the journal and scans to recover the tail.
 func Open(path string, opts *Options) (*Log, error) {
 	if opts == nil {
 		opts = &Options{}
 	}
 
-	var codec uint32
+	var compCodec uint8
 	switch opts.Compression {
 	case "", "none":
-		codec = codecNone
+		compCodec = compNone
 	case "snappy":
-		codec = codecSnappy
+		compCodec = compSnappy
 	default:
+		fmt.Println("unknown compression codec:", opts.Compression)
 		return nil, io.ErrUnexpectedEOF
 	}
 
@@ -96,7 +159,7 @@ func Open(path string, opts *Options) (*Log, error) {
 		retainIndex:        opts.RetainIndex,
 		checkpointInterval: opts.CheckpointInterval,
 		deleteOnClose:      opts.DeleteOnClose,
-		codec:              codec,
+		compCodec:          compCodec,
 	}
 	if l.retainIndex {
 		if l.checkpointInterval == 0 {
@@ -104,6 +167,29 @@ func Open(path string, opts *Options) (*Log, error) {
 		}
 		if l.checkpointInterval < 1 {
 			l.checkpointInterval = 1
+		}
+	}
+
+	hdr, err := l.readFileHeaderLocked()
+	if err != nil {
+		_ = fp.Close()
+		fmt.Println()
+		return nil, err
+	}
+
+	if hdr.Magic == 0 && hdr.Version == 0 {
+		if err := l.writeFileHeaderLocked(); err != nil {
+			_ = fp.Close()
+			return nil, err
+		}
+	} else {
+		if hdr.Magic != magicJWAL {
+			_ = fp.Close()
+			return nil, fmt.Errorf("jwal: invalid magic number")
+		}
+		if hdr.Version != version {
+			_ = fp.Close()
+			return nil, fmt.Errorf("jwal: unsupported version %d", hdr.Version)
 		}
 	}
 
@@ -117,9 +203,9 @@ func Open(path string, opts *Options) (*Log, error) {
 // scanAndRecover validates stored bytes by crc32(stored) and truncates torn tails.
 // It also rebuilds the (full or sparse) in-memory index.
 func (l *Log) scanAndRecover() error {
-	var off int64 // header offset of current record
+	var off int64 = dataBase // header offset of current record
 	var buf []byte
-	var hdr [headerSize]byte
+	var hdr [recordHdrSize]byte
 
 	fi, err := l.fp.Stat()
 	if err != nil {
@@ -127,7 +213,12 @@ func (l *Log) scanAndRecover() error {
 	}
 	size := fi.Size()
 
-	for off+headerSize <= size {
+	if size < dataBase {
+		_, err = l.fp.Seek(size, io.SeekEnd)
+		return err
+	}
+
+	for off+recordHdrSize <= size {
 		// read header
 		if _, err := l.fp.ReadAt(hdr[:], off); err != nil {
 			if err == io.EOF {
@@ -136,7 +227,7 @@ func (l *Log) scanAndRecover() error {
 			return err
 		}
 		storedLen := binary.LittleEndian.Uint64(hdr[0:8])
-		end := off + headerSize + int64(storedLen)
+		end := off + recordHdrSize + int64(storedLen)
 		if end > size {
 			return l.fp.Truncate(off)
 		}
@@ -146,7 +237,7 @@ func (l *Log) scanAndRecover() error {
 		if len(buf) < int(storedLen) {
 			buf = make([]byte, int(storedLen))
 		}
-		if _, err := l.fp.ReadAt(buf[:int(storedLen)], off+headerSize); err != nil {
+		if _, err := l.fp.ReadAt(buf[:int(storedLen)], off+recordHdrSize); err != nil {
 			if err == io.EOF {
 				return l.fp.Truncate(off)
 			}
@@ -161,7 +252,7 @@ func (l *Log) scanAndRecover() error {
 		if l.retainIndex {
 			if l.checkpointInterval == 1 {
 				// full index stores DATA-start offsets (payload start)
-				l.idx = append(l.idx, off+headerSize)
+				l.idx = append(l.idx, off+recordHdrSize)
 			} else {
 				recNum := l.count.Load() + 1
 				if (recNum-1)%uint64(l.checkpointInterval) == 0 {
@@ -182,7 +273,7 @@ func (l *Log) Append(data []byte) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	var hdr [headerSize]byte
+	var hdr [recordHdrSize]byte
 
 	hdrOff, err := l.fp.Seek(0, io.SeekEnd)
 	if err != nil {
@@ -190,13 +281,12 @@ func (l *Log) Append(data []byte) (uint64, error) {
 	}
 
 	// Prepare payload (maybe compressed)
-	payload, storedLen, ulen, codec := l.preparePayloadLocked(data)
+	payload, storedLen, ulen := l.preparePayloadLocked(data)
 
 	// Write header
 	binary.LittleEndian.PutUint64(hdr[0:8], storedLen)
 	binary.LittleEndian.PutUint32(hdr[8:12], crc32.ChecksumIEEE(payload))
 	binary.LittleEndian.PutUint32(hdr[12:16], ulen)
-	binary.LittleEndian.PutUint32(hdr[16:20], codec)
 	// [20..23] reserved = 0
 
 	if _, err := l.w.Write(hdr[:]); err != nil {
@@ -217,7 +307,7 @@ func (l *Log) Append(data []byte) (uint64, error) {
 	// update index
 	if l.retainIndex {
 		if l.checkpointInterval == 1 {
-			l.idx = append(l.idx, hdrOff+headerSize) // payload start
+			l.idx = append(l.idx, hdrOff+recordHdrSize) // payload start
 		} else {
 			next := l.count.Load() + 1
 			if (next-1)%uint64(l.checkpointInterval) == 0 {
@@ -230,15 +320,15 @@ func (l *Log) Append(data []byte) (uint64, error) {
 	return l.count.Load(), nil
 }
 
-func (l *Log) preparePayloadLocked(data []byte) (payload []byte, storedLen uint64, ulen uint32, codec uint32) {
-	switch l.codec {
-	case codecNone:
-		return data, uint64(len(data)), 0, codecNone
-	case codecSnappy:
+func (l *Log) preparePayloadLocked(data []byte) (payload []byte, storedLen uint64, ulen uint32) {
+	switch l.compCodec {
+	case compNone:
+		return data, uint64(len(data)), 0
+	case compSnappy:
 		l.compScratch = snappy.Encode(l.compScratch[:0], data)
-		return l.compScratch, uint64(len(l.compScratch)), uint32(len(data)), codecSnappy
+		return l.compScratch, uint64(len(l.compScratch)), uint32(len(data))
 	default:
-		return data, uint64(len(data)), 0, codecNone
+		return data, uint64(len(data)), 0
 	}
 }
 
@@ -247,20 +337,19 @@ func (l *Log) Read(index uint64) ([]byte, error) {
 		return nil, io.EOF
 	}
 
-	var hdr [headerSize]byte
+	var hdr [recordHdrSize]byte
 
 	dataOff, err := l.locateDataOffsetLocked(index)
 	if err != nil {
 		return nil, err
 	}
 
-	// read header again (dataOff-headerSize)
-	if _, err := l.fp.ReadAt(hdr[:], dataOff-headerSize); err != nil {
+	// read header again (dataOff-recordHdrSize)
+	if _, err := l.fp.ReadAt(hdr[:], dataOff-recordHdrSize); err != nil {
 		return nil, err
 	}
 	storedLen := int(binary.LittleEndian.Uint64(hdr[0:8]))
 	ulen := binary.LittleEndian.Uint32(hdr[12:16])
-	codec := binary.LittleEndian.Uint32(hdr[16:20])
 
 	// read stored bytes
 	buf := make([]byte, storedLen)
@@ -274,10 +363,10 @@ func (l *Log) Read(index uint64) ([]byte, error) {
 	}
 
 	// decompress if needed
-	switch codec {
-	case codecNone:
+	switch l.compCodec {
+	case compNone:
 		return buf, nil
-	case codecSnappy:
+	case compSnappy:
 		out, err := snappy.Decode(nil, buf)
 		if err != nil {
 			return nil, err
@@ -297,18 +386,17 @@ func (l *Log) ReadInto(index uint64, dst []byte) ([]byte, error) {
 		return nil, io.EOF
 	}
 
-	var hdr [headerSize]byte
+	var hdr [recordHdrSize]byte
 
 	dataOff, err := l.locateDataOffsetLocked(index)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := l.fp.ReadAt(hdr[:], dataOff-headerSize); err != nil {
+	if _, err := l.fp.ReadAt(hdr[:], dataOff-recordHdrSize); err != nil {
 		return nil, err
 	}
 	storedLen := int(binary.LittleEndian.Uint64(hdr[0:8]))
 	ulen := binary.LittleEndian.Uint32(hdr[12:16])
-	codec := binary.LittleEndian.Uint32(hdr[16:20])
 
 	// read stored bytes
 	tmp := make([]byte, storedLen)
@@ -319,8 +407,8 @@ func (l *Log) ReadInto(index uint64, dst []byte) ([]byte, error) {
 		return nil, io.ErrUnexpectedEOF
 	}
 
-	switch codec {
-	case codecNone:
+	switch l.compCodec {
+	case compNone:
 		// copy into dst if provided; ReadInto contract returns owned slice
 		n := len(tmp)
 		if cap(dst) < n {
@@ -330,7 +418,7 @@ func (l *Log) ReadInto(index uint64, dst []byte) ([]byte, error) {
 		}
 		copy(dst, tmp)
 		return dst, nil
-	case codecSnappy:
+	case compSnappy:
 		// snappy.Decode requires a new buffer; we can allocate exact size if ulen>0
 		if ulen > 0 && int(ulen) <= cap(dst) {
 			dst = dst[:int(ulen)]
@@ -356,8 +444,6 @@ func (l *Log) ReadInto(index uint64, dst []byte) ([]byte, error) {
 func (l *Log) LastIndex() uint64 {
 	return l.count.Load()
 }
-
-// TruncateBack keeps records up to and including index; if index==0 clears file.
 func (l *Log) TruncateBack(index uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -366,22 +452,21 @@ func (l *Log) TruncateBack(index uint64) error {
 		return io.EOF
 	}
 
-	var hdr [headerSize]byte
-
+	var hdr [recordHdrSize]byte
 	var newSize int64
+
 	if index == 0 {
-		newSize = 0
+		newSize = dataBase // keep file header
 	} else {
 		dataOff, err := l.locateDataOffsetLocked(index)
 		if err != nil {
 			return err
 		}
-		// read header to get storedLen
-		if _, err := l.fp.ReadAt(hdr[:], dataOff-headerSize); err != nil {
+		if _, err := l.fp.ReadAt(hdr[:], dataOff-recordHdrSize); err != nil {
 			return err
 		}
 		storedLen := int64(binary.LittleEndian.Uint64(hdr[0:8]))
-		newSize = (dataOff - headerSize) + headerSize + storedLen
+		newSize = (dataOff - recordHdrSize) + recordHdrSize + storedLen
 	}
 
 	if err := l.w.Flush(); err != nil {
@@ -394,7 +479,6 @@ func (l *Log) TruncateBack(index uint64) error {
 		return err
 	}
 
-	// fix in-memory index
 	if l.retainIndex {
 		if l.checkpointInterval == 1 {
 			if index < uint64(len(l.idx)) {
@@ -446,18 +530,16 @@ func (l *Log) flushAndSyncLocked() error {
 	}
 	return l.fp.Sync()
 }
-
 func (l *Log) locateDataOffsetLocked(index uint64) (int64, error) {
-	var hdr [headerSize]byte
+	var hdr [recordHdrSize]byte
 
 	if l.retainIndex {
 		if l.checkpointInterval == 1 {
-			// full index: direct lookup
-			return l.idx[index-1], nil
+			return l.idx[index-1], nil // payload start
 		}
-		// sparse: jump to nearest checkpoint ≤ index, then scan forward
+		// sparse: start from nearest checkpoint header offset
 		k := uint64(l.checkpointInterval)
-		cp := (index - 1) / k // 0-based checkpoint block
+		cp := (index - 1) / k
 
 		var hdrOff int64
 		var startIdx uint64
@@ -471,7 +553,7 @@ func (l *Log) locateDataOffsetLocked(index uint64) (int64, error) {
 				startIdx = (uint64(len(l.idx))-1)*k + 1
 			}
 		} else {
-			hdrOff = 0
+			hdrOff = dataBase
 			startIdx = 1
 		}
 
@@ -481,22 +563,22 @@ func (l *Log) locateDataOffsetLocked(index uint64) (int64, error) {
 				return 0, err
 			}
 			storedLen := int64(binary.LittleEndian.Uint64(hdr[0:8]))
-			off += headerSize + storedLen
+			off += recordHdrSize + storedLen
 		}
-		return off + headerSize, nil
+		return off + recordHdrSize, nil
 	}
 
-	// no index: linear scan from BOF
-	var off int64
+	// no index: linear scan from BOF of data region
+	off := int64(dataBase)
 	for cur := uint64(1); cur <= index; cur++ {
 		if _, err := l.fp.ReadAt(hdr[:], off); err != nil {
 			return 0, err
 		}
 		storedLen := int64(binary.LittleEndian.Uint64(hdr[0:8]))
 		if cur == index {
-			return off + headerSize, nil
+			return off + recordHdrSize, nil
 		}
-		off += headerSize + storedLen
+		off += recordHdrSize + storedLen
 	}
 	return 0, io.EOF
 }

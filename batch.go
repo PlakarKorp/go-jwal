@@ -48,7 +48,7 @@ func (l *Log) appendBatch(records [][]byte) (first, last uint64, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	var hdr [headerSize]byte
+	var hdr [recordHdrSize]byte
 
 	hdrOff, err := l.fp.Seek(0, io.SeekEnd)
 	if err != nil {
@@ -60,13 +60,12 @@ func (l *Log) appendBatch(records [][]byte) (first, last uint64, err error) {
 	off := hdrOff
 
 	for _, p := range records {
-		payload, storedLen, ulen, codec := l.preparePayloadLocked(p)
+		payload, storedLen, ulen := l.preparePayloadLocked(p)
 
 		// header
 		binary.LittleEndian.PutUint64(hdr[0:8], storedLen)
 		binary.LittleEndian.PutUint32(hdr[8:12], crc32.ChecksumIEEE(payload))
 		binary.LittleEndian.PutUint32(hdr[12:16], ulen)
-		binary.LittleEndian.PutUint32(hdr[16:20], codec)
 
 		if _, err := l.w.Write(hdr[:]); err != nil {
 			return 0, 0, err
@@ -76,8 +75,8 @@ func (l *Log) appendBatch(records [][]byte) (first, last uint64, err error) {
 		}
 
 		// advance expected file offset for index math
-		offs = append(offs, off+headerSize) // payload start
-		off += headerSize + int64(storedLen)
+		offs = append(offs, off+recordHdrSize) // payload start
+		off += recordHdrSize + int64(storedLen)
 	}
 
 	if err := l.w.Flush(); err != nil {
@@ -111,7 +110,7 @@ func (l *Log) appendBatch(records [][]byte) (first, last uint64, err error) {
 				// We can derive it from consecutive offs:
 				if i+1 < len(offs) {
 					// next header offset = payloadStartNext - headerSize
-					nextHdr := offs[i+1] - headerSize
+					nextHdr := offs[i+1] - recordHdrSize
 					off = nextHdr
 				} else {
 					// final position already in 'off' at end of loop above
