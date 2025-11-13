@@ -269,8 +269,7 @@ func (l *Log) scanAndRecover() error {
 	return err
 }
 
-// Append appends a new record (compressed if enabled) and returns its 1-based index.
-func (l *Log) Append(data []byte) (uint64, error) {
+func (l *Log) write(data []byte, sync bool) (uint64, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -296,11 +295,9 @@ func (l *Log) Append(data []byte) (uint64, error) {
 	if _, err := l.w.Write(payload); err != nil {
 		return 0, err
 	}
-	if err := l.w.Flush(); err != nil {
-		return 0, err
-	}
-	if !l.noSync {
-		if err := l.fp.Sync(); err != nil {
+
+	if sync {
+		if err := l.flushAndSyncLocked(); err != nil {
 			return 0, err
 		}
 	}
@@ -319,6 +316,14 @@ func (l *Log) Append(data []byte) (uint64, error) {
 
 	l.count.Add(1)
 	return l.count.Load(), nil
+}
+
+func (l *Log) Write(data []byte) (uint64, error) {
+	return l.write(data, true)
+}
+
+func (l *Log) WriteNoSync(data []byte) (uint64, error) {
+	return l.write(data, false)
 }
 
 func (l *Log) preparePayloadLocked(data []byte) (payload []byte, storedLen uint64, ulen uint32) {
@@ -535,6 +540,7 @@ func (l *Log) flushAndSyncLocked() error {
 	}
 	return l.fp.Sync()
 }
+
 func (l *Log) locateDataOffsetLocked(index uint64) (int64, error) {
 	var hdr [recordHdrSize]byte
 

@@ -68,7 +68,7 @@ func BenchmarkAppend_NoSync(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				if _, err := l.Append(data); err != nil {
+				if _, err := l.Write(data); err != nil {
 					b.Fatalf("Append: %v", err)
 				}
 			}
@@ -101,7 +101,7 @@ func BenchmarkAppend_SyncEach(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				if _, err := l.Append(data); err != nil {
+				if _, err := l.Write(data); err != nil {
 					b.Fatalf("Append: %v", err)
 				}
 			}
@@ -210,7 +210,7 @@ func BenchmarkAppend_Parallel_NoSync(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			if _, err := l.Append(data); err != nil {
+			if _, err := l.Write(data); err != nil {
 				b.Fatalf("Append: %v", err)
 			}
 		}
@@ -240,7 +240,7 @@ func BenchmarkReadSequential(b *testing.B) {
 					b.Fatalf("Open(prefill): %v", err)
 				}
 				for i := 0; i < prefill; i++ {
-					if _, err := l.Append(data); err != nil {
+					if _, err := l.Write(data); err != nil {
 						b.Fatalf("Append(prefill): %v", err)
 					}
 				}
@@ -304,7 +304,7 @@ func BenchmarkReadSequential_Into(b *testing.B) {
 			b.Fatalf("Open(prefill): %v", err)
 		}
 		for i := 0; i < max(b.N, 1<<14); i++ {
-			if _, err := l.Append(data); err != nil {
+			if _, err := l.Write(data); err != nil {
 				b.Fatalf("Append(prefill): %v", err)
 			}
 		}
@@ -365,7 +365,7 @@ func BenchmarkReadStreaming_NoIndex(b *testing.B) {
 			b.Fatalf("Open(prefill): %v", err)
 		}
 		for i := 0; i < max(b.N, 1<<14); i++ {
-			if _, err := l.Append(data); err != nil {
+			if _, err := l.Write(data); err != nil {
 				b.Fatalf("Append(prefill): %v", err)
 			}
 		}
@@ -518,7 +518,7 @@ func TestAppendRead_NoCompression(t *testing.T) {
 	defer l.Close()
 
 	in := []byte("hello world")
-	idx, err := l.Append(in)
+	idx, err := l.Write(in)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestAppendRead_Snappy(t *testing.T) {
 	defer l.Close()
 
 	in := payload(64 << 10) // 64 KiB
-	idx, err := l.Append(in)
+	idx, err := l.Write(in)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -649,10 +649,10 @@ func TestReopenAndTailRecovery_TornTail(t *testing.T) {
 		l := mustOpen(t, p, openOpt{comp: "none"})
 		defer l.Close()
 
-		if _, err := l.Append([]byte("ok-1")); err != nil {
+		if _, err := l.Write([]byte("ok-1")); err != nil {
 			t.Fatalf("append: %v", err)
 		}
-		if _, err := l.Append([]byte("ok-2")); err != nil {
+		if _, err := l.Write([]byte("ok-2")); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -686,10 +686,10 @@ func TestReopenAndTailRecovery_CRC(t *testing.T) {
 		l := mustOpen(t, p, openOpt{comp: "none"})
 		defer l.Close()
 
-		if _, err := l.Append([]byte("keep")); err != nil {
+		if _, err := l.Write([]byte("keep")); err != nil {
 			t.Fatalf("append: %v", err)
 		}
-		if _, err := l.Append([]byte("break-this")); err != nil {
+		if _, err := l.Write([]byte("break-this")); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -748,7 +748,7 @@ func TestTruncateBack_PreservesHeader(t *testing.T) {
 	defer l.Close()
 
 	for i := 0; i < 5; i++ {
-		if _, err := l.Append(payload(128)); err != nil {
+		if _, err := l.Write(payload(128)); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -784,7 +784,7 @@ func TestReadBounds(t *testing.T) {
 	if _, err := l.Read(1); !errors.Is(err, io.EOF) {
 		t.Fatalf("expected EOF on empty log, got %v", err)
 	}
-	if _, err := l.Append([]byte("x")); err != nil {
+	if _, err := l.Write([]byte("x")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if _, err := l.Read(2); !errors.Is(err, io.EOF) {
@@ -796,7 +796,7 @@ func TestSyncOption(t *testing.T) {
 	p := tmpPath(t)
 	// Open with NoSync; still should write and be reopenable.
 	l := mustOpen(t, p, openOpt{comp: "snappy", noSync: true})
-	if _, err := l.Append([]byte("nsync-1")); err != nil {
+	if _, err := l.Write([]byte("nsync-1")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if err := l.Sync(); err != nil {
@@ -828,7 +828,7 @@ func TestIterator_Basic(t *testing.T) {
 		[]byte("ccc"),
 	}
 	for _, x := range expect {
-		if _, err := l.Append(x); err != nil {
+		if _, err := l.Write(x); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -872,7 +872,7 @@ func TestDataOffsetAPI(t *testing.T) {
 	defer l.Close()
 
 	msg := []byte("hello")
-	if _, err := l.Append(msg); err != nil {
+	if _, err := l.Write(msg); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
@@ -934,7 +934,7 @@ func TestLargePayloads_ManyRecords(t *testing.T) {
 func TestDeleteOnClose(t *testing.T) {
 	p := tmpPath(t)
 	l := mustOpen(t, p, openOpt{comp: "none", deleteOnClose: true})
-	if _, err := l.Append([]byte("bye")); err != nil {
+	if _, err := l.Write([]byte("bye")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if err := l.Close(); err != nil {
@@ -954,7 +954,7 @@ func TestConcurrencySmoke(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < 200; i++ {
-			_, _ = l.Append(payload(300))
+			_, _ = l.Write(payload(300))
 			time.Sleep(time.Millisecond)
 		}
 		close(done)
@@ -1335,7 +1335,7 @@ func TestReadInto_ReusesDstWithSnappy(t *testing.T) {
 	for i := range orig {
 		orig[i] = byte(i)
 	}
-	if _, err := l.Append(orig); err != nil {
+	if _, err := l.Write(orig); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
@@ -1360,7 +1360,7 @@ func TestIter_FromMiddleIndex(t *testing.T) {
 	defer l.Close()
 
 	for i := 0; i < 10; i++ {
-		if _, err := l.Append([]byte{byte(i)}); err != nil {
+		if _, err := l.Write([]byte{byte(i)}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -1399,7 +1399,7 @@ func TestDataOffset_NoIndex_LinearScan(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		rec := bytes.Repeat([]byte{byte(0xA0 + i)}, 50+i*13)
 		recs = append(recs, rec)
-		if _, err := l.Append(rec); err != nil {
+		if _, err := l.Write(rec); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
@@ -1438,7 +1438,7 @@ func TestCompressionHeaderHonoredOnReopen(t *testing.T) {
 
 	// phase 1: write with snappy
 	l := mustOpen(t, p, openOpt{comp: "snappy"})
-	if _, err := l.Append([]byte("s1")); err != nil {
+	if _, err := l.Write([]byte("s1")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 	if err := l.Close(); err != nil {
@@ -1448,7 +1448,7 @@ func TestCompressionHeaderHonoredOnReopen(t *testing.T) {
 	// phase 2: reopen with "none" in options (should be ignored) and append again
 	l = mustOpen(t, p, openOpt{comp: "none"})
 	defer l.Close()
-	if _, err := l.Append([]byte("s2")); err != nil {
+	if _, err := l.Write([]byte("s2")); err != nil {
 		t.Fatalf("append2: %v", err)
 	}
 
@@ -1494,7 +1494,7 @@ func TestReadIndexZero_And_Beyond(t *testing.T) {
 	p := tmpPath(t)
 	l := mustOpen(t, p, openOpt{comp: "none"})
 	defer l.Close()
-	if _, err := l.Append([]byte("x")); err != nil {
+	if _, err := l.Write([]byte("x")); err != nil {
 		t.Fatalf("append: %v", err)
 	}
 
@@ -1557,7 +1557,7 @@ func TestRead_CRCMismatch_ReturnsUnexpectedEOF(t *testing.T) {
 	defer l.Close()
 
 	data := payload(8 << 10)
-	if _, err := l.Append(data); err != nil {
+	if _, err := l.Write(data); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Sync()
@@ -1629,7 +1629,7 @@ func TestDataOffset_OutOfRange(t *testing.T) {
 	if _, err := l.DataOffset(0); err == nil {
 		t.Fatalf("DataOffset(0) should error")
 	}
-	if _, err := l.Append([]byte("a")); err != nil {
+	if _, err := l.Write([]byte("a")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.DataOffset(2); err == nil {
@@ -1924,7 +1924,7 @@ func TestOpen_RetainIndex_DefaultK(t *testing.T) {
 	defer l.Close()
 	// Indirectly confirm by forcing a read that would scan from the nearest checkpoint.
 	// With just a few records, behavior is identical, but at least we cover the branch.
-	if _, err := l.Append([]byte("x")); err != nil {
+	if _, err := l.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.Read(1); err != nil {
@@ -1940,7 +1940,7 @@ func TestReadInto_None_DstTooSmall(t *testing.T) {
 	defer l.Close()
 
 	msg := bytes.Repeat([]byte{7}, 1024)
-	if _, err := l.Append(msg); err != nil {
+	if _, err := l.Write(msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1960,7 +1960,7 @@ func TestReadInto_None_DstBigEnough(t *testing.T) {
 	defer l.Close()
 
 	msg := bytes.Repeat([]byte{9}, 256)
-	if _, err := l.Append(msg); err != nil {
+	if _, err := l.Write(msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1982,7 +1982,7 @@ func TestReadInto_Snappy_DstSmall_ForceNonReuse(t *testing.T) {
 	defer l.Close()
 
 	orig := bytes.Repeat([]byte{1, 2, 3, 4}, 8<<10) // 32 KiB
-	if _, err := l.Append(orig); err != nil {
+	if _, err := l.Write(orig); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2037,7 +2037,7 @@ func TestRead_Snappy_UlenMismatch(t *testing.T) {
 	defer l.Close()
 
 	orig := bytes.Repeat([]byte{0xCC}, 8<<10) // 8 KiB
-	if _, err := l.Append(orig); err != nil {
+	if _, err := l.Write(orig); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Sync()
@@ -2078,7 +2078,7 @@ func TestIter_FromBeyondEnd(t *testing.T) {
 	l := mustOpen(t, p, openOpt{comp: "none"})
 	defer l.Close()
 
-	if _, err := l.Append([]byte("x")); err != nil {
+	if _, err := l.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := l.Iter(2); !errors.Is(err, io.EOF) {
@@ -2159,7 +2159,7 @@ func TestOpen_Reopen_UsesHeaderCodec(t *testing.T) {
 	// Write with snappy.
 	l1 := mustOpen(t, p, openOpt{comp: "snappy"})
 	in := bytes.Repeat([]byte{0x5A}, 16<<10)
-	if _, err := l1.Append(in); err != nil {
+	if _, err := l1.Write(in); err != nil {
 		t.Fatal(err)
 	}
 	_ = l1.Close()
@@ -2183,7 +2183,7 @@ func TestTruncateBack_OutOfRange(t *testing.T) {
 	defer l.Close()
 
 	// 1 record
-	if _, err := l.Append([]byte("x")); err != nil {
+	if _, err := l.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2269,7 +2269,7 @@ func TestIter_NextInto_Snappy_UlenMismatch(t *testing.T) {
 	defer l.Close()
 
 	data := bytes.Repeat([]byte{0xAB}, 8192) // 8 KiB
-	if _, err := l.Append(data); err != nil {
+	if _, err := l.Write(data); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Sync()
@@ -2345,7 +2345,7 @@ func TestIter_NextInto_PayloadReadError(t *testing.T) {
 	l := mustOpen(t, p, openOpt{comp: "snappy", retain: true, checkptK: 1})
 	defer l.Close()
 
-	if _, err := l.Append(bytes.Repeat([]byte{3}, 4096)); err != nil {
+	if _, err := l.Write(bytes.Repeat([]byte{3}, 4096)); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Sync()
@@ -2383,7 +2383,7 @@ func TestIter_NextInto_Snappy_DecodeError_Reuse(t *testing.T) {
 	defer l.Close()
 
 	payload := bytes.Repeat([]byte{0x7A}, 8<<10) // 8 KiB
-	if _, err := l.Append(payload); err != nil {
+	if _, err := l.Write(payload); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Sync()
@@ -2441,7 +2441,7 @@ func TestIter_NextInto_Snappy_DecodeError_NonReuse(t *testing.T) {
 	defer l.Close()
 
 	payload := bytes.Repeat([]byte{0x4D}, 4<<10) // 4 KiB
-	if _, err := l.Append(payload); err != nil {
+	if _, err := l.Write(payload); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Sync()
@@ -2505,7 +2505,7 @@ func TestIter_NextInto_IdxZeroGuard(t *testing.T) {
 	l := mustOpen(t, p, openOpt{comp: "none"})
 	defer l.Close()
 
-	if _, err := l.Append([]byte("x")); err != nil {
+	if _, err := l.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	it, err := l.Iter(1)
@@ -2525,7 +2525,7 @@ func TestIter_NextInto_UnknownCodec_DefaultBranch(t *testing.T) {
 	defer l.Close()
 
 	// Write one record so iterator can read a header/payload.
-	if _, err := l.Append([]byte("zzz")); err != nil {
+	if _, err := l.Write([]byte("zzz")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2580,7 +2580,7 @@ func TestIter_NextInto_Snappy_DecodeError(t *testing.T) {
 
 	// Write a valid snappy-compressed record
 	data := bytes.Repeat([]byte{0x42}, 8<<10)
-	if _, err := l.Append(data); err != nil {
+	if _, err := l.Write(data); err != nil {
 		t.Fatal(err)
 	}
 	_ = l.Sync()
@@ -2757,7 +2757,7 @@ func TestAppendBatch_SparseIndex_StartNotAligned_MultiBoundary(t *testing.T) {
 
 	// Seed 3 records so old=3 (not aligned; next records start at index 4).
 	for i := 0; i < 3; i++ {
-		if _, err := l.Append([]byte{byte('A' + i)}); err != nil {
+		if _, err := l.Write([]byte{byte('A' + i)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2812,7 +2812,7 @@ func TestOpen_WithNilOptions_Defaults(t *testing.T) {
 
 	// Append/read smoke just to ensure the default codec works.
 	in := []byte("nil-opts")
-	if _, err := l.Append(in); err != nil {
+	if _, err := l.Write(in); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	out, err := l.Read(1)
